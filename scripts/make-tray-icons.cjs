@@ -46,18 +46,20 @@ function coverage(x, y, filled) {
   return hits / 9;
 }
 
-function png(filled) {
+function png(filled, luma) {
   const raw = Buffer.alloc(S * (S * 4 + 1));
   let p = 0;
   for (let y = 0; y < S; y++) {
     raw[p++] = 0; // filter: none
     for (let x = 0; x < S; x++) {
       const a = Math.round(coverage(x, y, filled) * 255);
-      // Black with alpha — macOS treats this as a template and recolours it for
-      // the current menu bar appearance.
-      raw[p++] = 0;
-      raw[p++] = 0;
-      raw[p++] = 0;
+      // Black with alpha for macOS, which treats it as a template image and
+      // recolours it for the current menu bar appearance. Nothing else does
+      // that, so those platforms get the same shape drawn white — see the note
+      // in src/trayIcons.ts.
+      raw[p++] = luma;
+      raw[p++] = luma;
+      raw[p++] = luma;
       raw[p++] = a;
     }
   }
@@ -75,8 +77,14 @@ function png(filled) {
   ]);
 }
 
-const idle = png(false).toString('base64');
-const active = png(true).toString('base64');
-console.log(`idle ${idle.length} chars, active ${active.length} chars`);
-console.log('IDLE=' + idle);
-console.log('ACTIVE=' + active);
+for (const [suffix, luma] of [
+  ['', 0],
+  ['_LIGHT', 255],
+]) {
+  for (const [name, filled] of [
+    ['IDLE', false],
+    ['ACTIVE', true],
+  ]) {
+    console.log(`${name}${suffix}=` + png(filled, luma).toString('base64'));
+  }
+}

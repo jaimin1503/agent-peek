@@ -21,6 +21,28 @@
 //!    triggers a redock; the `docking` flag breaks that loop.
 //! 5. **Exactly one code path changes the frame** — `apply`.
 //!
+//! # Windows and Linux
+//!
+//! Everything below with a macOS `cfg` is a no-op there, and the contract is
+//! correspondingly smaller. tao's `always_on_top` and `skip_taskbar` — both set
+//! in `tauri.conf.json` — already give what `NSPopUpMenuWindowLevel` and
+//! `LSUIElement` give here: a window above the normal band, absent from the
+//! taskbar and from Alt-Tab. `reassert` re-applies topmost on the keepalive
+//! because Windows silently demotes it when another app claims topmost. There is
+//! no Spaces analogue, so none of the ordering repair applies.
+//!
+//! The one behavioural difference is focus: the overlay is a plain window there,
+//! so clicking it takes focus, and losing focus is therefore a reliable "you
+//! clicked somewhere else" — which is what `handle_window_event` emits
+//! `overlay:blur` from, in place of the global mouse monitor.
+//!
+//! ponytail: letting it take focus is the whole simplification. Full parity —
+//! never activating, and still knowing about outside clicks — means
+//! `WS_EX_NOACTIVATE` plus a `WH_MOUSE_LL` hook on its own message pump. Worth it
+//! only if bouncing focus off the terminal for one click turns out to annoy.
+//! Known ceiling either way: an *exclusive*-fullscreen Direct3D app covers a
+//! topmost window, and nothing short of an overlay swapchain changes that.
+//!
 //! Set `AGENTPEEK_TRACE=1` to log the window's level, collection behaviour,
 //! visibility and active-Space membership on every reassert. That readback is
 //! what identified the activation-policy bug below; it is kept because these
@@ -349,6 +371,13 @@ impl OverlayWindow {
     /// React to the window being moved or rescaled by anything other than us.
     pub fn handle_window_event(&self, event: &WindowEvent) {
         match event {
+            // The Windows/Linux stand-in for the global mouse monitor: this
+            // window *can* be focused there, so losing focus is a click that
+            // landed somewhere else. See the platform note in the module header.
+            #[cfg(not(target_os = "macos"))]
+            WindowEvent::Focused(false) => {
+                let _ = self.inner.window.emit("overlay:blur", ());
+            }
             WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 // Invariant 4. Without this, `set_position` -> `Moved` -> redock
                 // -> `set_position` spins forever.
@@ -591,8 +620,13 @@ fn reassert(window: &WebviewWindow) {
             );
         }
     }
+    // Windows demotes a topmost window whenever another application claims
+    // topmost for itself, and says nothing about it. The keepalive already runs
+    // for macOS's sake, so repairing it here costs one `SetWindowPos` every two
+    // seconds — and tao issues that with `SWP_NOACTIVATE`, so the heartbeat can
+    // never steal focus from what you are typing into.
     #[cfg(not(target_os = "macos"))]
-    let _ = window;
+    let _ = window.set_always_on_top(true);
 }
 
 // ── Commands: the entire surface the frontend is allowed to touch ────────────

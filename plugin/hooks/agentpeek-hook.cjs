@@ -42,6 +42,31 @@ const TERMINAL_APPS = {
   Warp: 'Warp',
 };
 
+// The same, for Windows, where `focus_app` matches on the executable's file
+// name instead. Fewer entries because most of the terminals above do not exist
+// there — and Windows Terminal sets no TERM_PROGRAM at all, only WT_SESSION.
+const TERMINAL_EXES = {
+  vscode: 'Code.exe',
+  Hyper: 'Hyper.exe',
+  WezTerm: 'wezterm-gui.exe',
+};
+
+/**
+ * Which application to raise when a session wants you, or `null` if it cannot be
+ * identified — plain `cmd`, PowerShell and most Linux terminals announce
+ * nothing, and the card disables its button rather than guessing.
+ */
+function terminalApp(env, platform) {
+  if (platform === 'darwin') return TERMINAL_APPS[env.TERM_PROGRAM] || null;
+  if (platform === 'win32') {
+    return TERMINAL_EXES[env.TERM_PROGRAM] || (env.WT_SESSION ? 'WindowsTerminal.exe' : null);
+  }
+  // ponytail: nothing on Linux. Raising another app's window has no portable
+  // answer across X11 and Wayland, so `focus_app` refuses there and this keeps
+  // the button greyed out instead of offering something that cannot work.
+  return null;
+}
+
 function truncate(s, n) {
   s = String(s).replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
@@ -189,14 +214,40 @@ function load(file) {
   }
 }
 
+/** Synchronous sleep. The only one Node has, and this runs before any I/O. */
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 /**
  * tmp + rename. The overlay watches this directory, so a partial file would be
  * read as truncated JSON; rename is atomic and never exposes one.
+ *
+ * Windows is the reason for the retry: renaming over a file another process has
+ * open fails with EPERM or EBUSY, and the overlay opens every session file once
+ * a second. Without this the whole update is dropped — silently, because main()
+ * swallows everything — so the card would freeze until the next hook fired.
+ * Worst case here is 40ms against a 5s hook timeout.
  */
 function save(file, state) {
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state));
-  fs.renameSync(tmp, file);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (e) {
+      if (attempt === 4) {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          /* nothing left to clean up */
+        }
+        throw e;
+      }
+      sleep(10);
+    }
+  }
 }
 
 function main() {
@@ -247,8 +298,10 @@ function apply(payload) {
 
   state.cwd = payload.cwd || state.cwd;
   state.updatedAt = now;
-  if (process.env.TERM_PROGRAM) {
-    state.terminalApp = TERMINAL_APPS[process.env.TERM_PROGRAM] || null;
+  // Only when the environment says something, so an invocation that inherited a
+  // bare env cannot wipe what an earlier one detected.
+  if (process.env.TERM_PROGRAM || process.env.WT_SESSION) {
+    state.terminalApp = terminalApp(process.env, process.platform);
   }
 
   // What, if anything, this invocation contributes to the timeline. PostToolUse
@@ -357,6 +410,7 @@ if (require.main === module) main();
 module.exports = {
   describeTool,
   classifyKind,
+  terminalApp,
   editedFile,
   toolFailed,
   readTokens,

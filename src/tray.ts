@@ -3,7 +3,7 @@ import { TrayIcon } from '@tauri-apps/api/tray';
 import { invoke } from '@tauri-apps/api/core';
 import { needsAttention, type SessionState } from './protocol';
 import { isPaused, setPaused } from './notify';
-import { trayIcon } from './trayIcons';
+import { iconsAreTemplate, trayIcon } from './trayIcons';
 import { overlayHide, overlayIsVisible, overlayShow } from './overlay';
 
 let tray: TrayIcon | null = null;
@@ -44,7 +44,9 @@ export async function updateTray(sessions: SessionState[]) {
       TrayIcon.new({
         id: 'agentpeek',
         icon: await trayIcon(false),
-        iconAsTemplate: true,
+        // Only true for the black pair; the white one off macOS must be drawn
+        // as-is, and this field would otherwise flatten it to its alpha.
+        iconAsTemplate: iconsAreTemplate,
         tooltip: 'AgentPeek',
         menu: await buildMenu(),
       }))();

@@ -1,0 +1,68 @@
+name: release
+
+# Tag a version and this builds the three artifacts users actually download.
+# The release is created as a *draft* so it can be checked before anyone gets it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      # One platform failing must not throw away the other two builds.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            target: aarch64-apple-darwin
+            label: macOS (Apple Silicon)
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            label: macOS (Intel)
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: Windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - run: pnpm install --frozen-lockfile
+
+      # Cheap, and this is the only place the hook runs on Windows before a
+      # release goes out — the path and rename behaviour differ there.
+      - run: node plugin/hooks/test-hook.cjs
+      - run: npx tsc --noEmit
+
+      # No signing or notarization: this is an unsigned open-source build, and
+      # README.md tells users what their OS will say about that.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: AgentPeek ${{ github.ref_name }}
+          releaseDraft: true
+          args: --target ${{ matrix.target }}

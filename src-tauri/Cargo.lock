@@ -21,6 +21,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-fs",
  "tauri-plugin-notification",
+ "windows",
 ]
 
 [[package]]

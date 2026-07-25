@@ -36,6 +36,26 @@ assert.equal(h.describeTool('Edit', {}), 'Edit', 'missing file_path must not thr
 assert.equal(h.editedFile('Write', { file_path: '/a/Foo.ts' }), 'Foo.ts');
 assert.equal(h.editedFile('Read', { file_path: '/a/Foo.ts' }), null, 'reads are not edits');
 
+// --- terminalApp ------------------------------------------------------------
+// macOS wants an application name for `open -a`, Windows an executable name to
+// match against a window's process. Neither may ever guess.
+assert.equal(h.terminalApp({ TERM_PROGRAM: 'vscode' }, 'darwin'), 'Visual Studio Code');
+assert.equal(h.terminalApp({ TERM_PROGRAM: 'ghostty' }, 'darwin'), 'Ghostty');
+assert.equal(h.terminalApp({ TERM_PROGRAM: 'vscode' }, 'win32'), 'Code.exe');
+assert.equal(
+  h.terminalApp({ WT_SESSION: 'abc' }, 'win32'),
+  'WindowsTerminal.exe',
+  'Windows Terminal announces itself only through WT_SESSION'
+);
+assert.equal(
+  h.terminalApp({ TERM_PROGRAM: 'vscode', WT_SESSION: 'abc' }, 'win32'),
+  'Code.exe',
+  'VS Code hosted inside Windows Terminal is still VS Code'
+);
+assert.equal(h.terminalApp({ TERM_PROGRAM: 'ghostty' }, 'win32'), null, 'no Windows build to raise');
+assert.equal(h.terminalApp({}, 'win32'), null, 'plain cmd/PowerShell say nothing');
+assert.equal(h.terminalApp({ TERM_PROGRAM: 'vscode' }, 'linux'), null, 'no portable raise on Linux');
+
 // --- toolFailed -------------------------------------------------------------
 assert.equal(h.toolFailed({ is_error: true }), true);
 assert.equal(h.toolFailed({ error: 'boom' }), true);

@@ -1,0 +1,70 @@
+name: ci
+
+# Catches regressions before a tag exists. Deliberately builds no artifacts and
+# publishes no release — that is release.yml's job and its only job.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS
+          - platform: windows-latest
+            label: Windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - run: pnpm install --frozen-lockfile
+
+      # Runs on both platforms on purpose: the hook's home-directory paths and
+      # its rename-retry behave differently on Windows, and this is the only
+      # place that difference is exercised.
+      - name: Hook tests
+        run: node plugin/hooks/test-hook.cjs
+
+      - name: Frontend types
+        run: npx tsc --noEmit
+
+      # Also produces dist/, which the Rust check below embeds.
+      - name: Frontend build
+        run: pnpm build
+
+      # `check`, not `build`: it type-checks every platform's `cfg` block without
+      # paying for codegen and linking. The Windows runner is the only machine
+      # that compiles the Win32 half of `focus_app` at all — `cargo check
+      # --target x86_64-pc-windows-msvc` cannot run from macOS, because
+      # tauri-build needs llvm-rc for the Windows resource.
+      - name: Rust check
+        run: cargo check --manifest-path src-tauri/Cargo.toml

@@ -6,13 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pnpm install
-pnpm tauri dev                  # run overlay (macOS suppresses notifications for the unbundled dev binary)
-pnpm tauri build                # -> src-tauri/target/release/bundle/macos/AgentPeek.app
+pnpm tauri dev                  # run overlay (no notifications from the unbundled dev binary, macOS or Windows)
+pnpm tauri build                # -> bundle/macos/AgentPeek.app, or bundle/nsis/*-setup.exe on Windows
 pnpm build                      # tsc + vite build only (no Rust)
 npx tsc --noEmit                # frontend types
 node plugin/hooks/test-hook.cjs # hook logic tests (also: pnpm test:hook)
 node scripts/make-tray-icons.cjs # regenerate menu-bar template icons
+
+git tag v0.1.1 && git push --tags   # -> .github/workflows/release.yml builds a DRAFT release
 ```
+
+Two workflows, and they do not overlap:
+
+- **`.github/workflows/ci.yml`** — every PR and every push to `main`. Hook tests, `tsc`, `pnpm build`
+  and `cargo check` on macOS *and* Windows runners. The Windows leg is not redundant: it is the only
+  machine that compiles the `cfg(target_os = "windows")` half of `focus_app`, since `cargo check
+  --target x86_64-pc-windows-msvc` cannot run from macOS (`tauri-build` needs `llvm-rc`). Produces no
+  artifacts.
+- **`.github/workflows/release.yml`** — tags only. Builds macOS arm64, macOS x64 and Windows x64 and
+  attaches them to a **draft** GitHub release you publish by hand.
+
+Bump the version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and
+`plugin/.claude-plugin/plugin.json` together — nothing keeps them in sync. Builds are deliberately
+unsigned; `README.md` tells users what Gatekeeper and SmartScreen will say. There is no updater
+plugin, so upgrading means downloading the new installer.
 
 There is no test framework and no linter. `test-hook.cjs` is a plain `node:assert` script — no runner, no
 single-test selection; add assertions to it and run the whole file. It writes into the real
@@ -54,6 +71,27 @@ through `run_on_main_thread`. A Rust keepalive thread redocks every 2s because a
 being composited also has its timers throttled — the repair loop cannot live in JS.
 `AGENTPEEK_TRACE=1` logs level / collection behaviour / `isOnActiveSpace` on every reassert.
 
+### Platforms
+
+macOS is where the hard window work is; Windows and Linux take a deliberately smaller contract, also
+documented in the `overlay.rs` header. Everything ObjC sits behind `cfg(target_os = "macos")` with a
+`cfg(not(...))` counterpart — shared behaviour is written as `not(macos)` so Linux gets it too, though
+only Windows is tested.
+
+- `promote_to_panel` / `watch_outside_clicks` are no-ops off macOS. The overlay is an ordinary window
+  there, so `WindowEvent::Focused(false)` is what emits `overlay:blur`, and `reassert` re-applies
+  `set_always_on_top` because Windows silently demotes topmost windows.
+- `focus_app` in `lib.rs` has three bodies: `open -a` (macOS), `EnumWindows` + `SetForegroundWindow`
+  against a process image name (Windows, via the `windows` crate under a `cfg(target_os = "windows")`
+  dependency block), and an error on Linux. `name` must never be treated as something to execute.
+- The hook's `terminalApp(env, platform)` decides what that name is, and returns `null` — greying the
+  card's button out — wherever it cannot tell.
+- Two tray icon pairs: black (macOS template) and white (everywhere else, since nothing else
+  recolours). `iconsAreTemplate` in `trayIcons.ts` picks, and drives `iconAsTemplate`.
+- `cargo check --target x86_64-pc-windows-msvc` does **not** work from macOS — `tauri-build` needs
+  `llvm-rc` for the Windows resource. Type-check Win32 changes by copying the function into a scratch
+  crate that depends only on `windows`, or on a Windows machine.
+
 ### Contracts
 
 - **`src/protocol.ts` is hand-synced with the hook.** Change the state shape in one and you must change
@@ -75,8 +113,8 @@ being composited also has its timers throttled — the repair loop cannot live i
 - Deliberate simplifications are marked with `ponytail:` comments (polling over file watching, 200-file
   cap, two token-window buckets).
 
-`README.md` says the glass is a real `NSVisualEffectView` in `lib.rs` — that is stale. The current
-surface is an opaque CSS panel (`.panel` in `src/App.css`); there is no vibrancy code in `src-tauri`.
+The surface is an opaque CSS panel (`.panel` in `src/App.css`) — there is no vibrancy code in
+`src-tauri`, whatever an older draft of the README claimed.
 
 ### Reference docs
 
