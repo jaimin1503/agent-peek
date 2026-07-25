@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Run as an agent: no Dock icon, no app switcher entry.
+
+    This is deliberately declarative rather than a runtime
+    `set_activation_policy(.accessory)` call. Switching the policy *after* the
+    window exists leaves the window stranded — AppKit reports
+    `isOnActiveSpace() == false`, it never composites, and because an
+    uncomposited webview gets its timers throttled the UI silently stops
+    polling as well. Declaring it here means the process is an agent from
+    launch and the window is created with the correct policy.
+  -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

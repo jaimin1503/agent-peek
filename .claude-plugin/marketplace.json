@@ -1,0 +1,12 @@
+{
+  "name": "agentpeek",
+  "description": "The AgentPeek session-state hook for the AgentPeek overlay.",
+  "owner": { "name": "jaiminv" },
+  "plugins": [
+    {
+      "name": "agentpeek",
+      "source": "./plugin",
+      "description": "Publishes Claude Code session state to ~/.agentpeek for the AgentPeek overlay."
+    }
+  ]
+}

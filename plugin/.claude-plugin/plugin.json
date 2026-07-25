@@ -1,0 +1,6 @@
+{
+  "name": "agentpeek",
+  "description": "Publishes Claude Code session state to ~/.agentpeek so the AgentPeek overlay can display it.",
+  "version": "0.1.0",
+  "author": { "name": "jaiminv" }
+}

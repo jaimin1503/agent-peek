@@ -1,0 +1,159 @@
+@import 'tailwindcss';
+
+/* ── Typeface ────────────────────────────────────────────────────────────────
+   Cascadia Mono is a variable font whose default instance is ExtraLight, so
+   every rule below states a weight explicitly. Forgetting one is why an earlier
+   sample render came out anaemic.                                             */
+
+@font-face {
+  font-family: 'Cascadia Mono';
+  src: url('./fonts/CascadiaMono.woff2') format('woff2-variations');
+  font-weight: 200 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@theme {
+  --font-mono: 'Cascadia Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-sans: 'Cascadia Mono', ui-monospace, Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Cascadia Mono', ui-monospace, Menlo, monospace;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+
+  /* The window is sized *from* this content, so the content must be free to be
+     larger than the window currently is — otherwise the measurement is clamped
+     to the old size and the window can never grow. Both axes need this. */
+  width: max-content;
+  height: max-content;
+}
+
+::-webkit-scrollbar {
+  display: none;
+}
+
+* {
+  cursor: default;
+  user-select: none;
+}
+
+/* ── Surface ─────────────────────────────────────────────────────────────────
+   Opaque, not vibrancy. The window keeps a transparent margin so the panel can
+   cast its own shadow and read as floating rather than pasted on.             */
+
+.shell {
+  padding: 10px;
+}
+
+.panel {
+  --edge: rgb(255 255 255 / 0.1);
+  background: rgb(11 12 14 / 0.97);
+  border: 0.5px solid var(--edge);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.3),
+    0 8px 24px rgb(0 0 0 / 0.45),
+    inset 0 0.5px 0 rgb(255 255 255 / 0.06);
+  transition:
+    border-radius 260ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-color 300ms ease;
+  overflow: hidden;
+}
+
+/* At rest it is a pill, like a status readout rather than a window. */
+.panel--capsule {
+  border-radius: 999px;
+}
+
+.panel--attention {
+  --edge: rgb(251 191 36 / 0.42);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.3),
+    0 8px 24px rgb(0 0 0 / 0.45),
+    inset 0 0.5px 0 rgb(255 255 255 / 0.06),
+    0 0 0 3px rgb(251 191 36 / 0.07);
+}
+
+/* ── Terminal rules and leaders ──────────────────────────────────────────────
+   Frames are CSS borders, not box characters: a real character grid would have
+   to fight variable-length, truncated filenames. Characters are used only where
+   they are content — tree connectors, block bars, brackets, the spinner.       */
+
+.rule {
+  flex: 1;
+  height: 0;
+  border-top: 1px dashed rgb(255 255 255 / 0.14);
+}
+
+.leader {
+  flex: 1;
+  height: 0;
+  margin: 0 5px;
+  border-bottom: 1px dotted rgb(255 255 255 / 0.22);
+  transform: translateY(-3px);
+}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────────
+   Ten braille frames stepped by CSS, so nothing re-renders in JS per frame and
+   the compositor does the work. The column is 10 lines of exactly 1em, and the
+   viewport is 1em tall, so each step lands on exactly one glyph.               */
+
+.spin {
+  display: inline-block;
+  height: 1em;
+  line-height: 1em;
+  overflow: hidden;
+  vertical-align: -0.05em;
+}
+
+.spin__col {
+  display: block;
+  /* 10 frames over 1.2s = ~8 steps/sec. In a transparent window WebKit
+     software-composites, so every step redraws the whole window: at 0.8s this
+     measured 3.2% CPU against 1.0% with the animation off. Slower reads as a
+     calmer spinner and costs proportionally less. */
+  animation: spin-steps 1.2s steps(10, end) infinite;
+  will-change: transform;
+}
+
+.spin__col > i {
+  display: block;
+  height: 1em;
+  line-height: 1em;
+  font-style: normal;
+}
+
+@keyframes spin-steps {
+  to {
+    transform: translateY(-10em);
+  }
+}
+
+/* Static states just breathe, or sit still. */
+.pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin__col,
+  .pulse {
+    animation: none !important;
+  }
+}
