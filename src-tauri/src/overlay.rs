@@ -15,7 +15,8 @@
 //!    `set_size`, `set_position`, `show`, `hide` or reach for `ns_window`.
 //! 3. **Tray actions route through here** — via `overlay_show` / `overlay_hide`.
 //!    Calling `window.show()` directly skips reassertion and leaves the window
-//!    ordered out of the current Space, which is bug #2 below.
+//!    ordered out of the current Space, which is bug #2 below. On macOS `show()` is
+//!    not used at all — see the note in `apply`.
 //! 4. **Redocking is re-entrancy safe.** `set_position` emits `Moved`, and `Moved`
 //!    triggers a redock; the `docking` flag breaks that loop.
 //! 5. **Exactly one code path changes the frame** — `apply`.
@@ -44,12 +45,22 @@
 //! * Ordering repair must not depend on the frontend. A throttled webview cannot
 //!   run the timer that would fix the condition causing it to be throttled, so the
 //!   keepalive lives on a Rust thread.
+//! * The overlay was invisible over every *native*-fullscreen app (green button)
+//!   while working fine over a fullscreen VLC window — so the level was never the
+//!   problem, joining the fullscreen app's Space was. Two causes, both in `reassert`
+//!   and `apply`: the orderOut/orderFrontRegardless re-association was guarded by
+//!   `!isOnActiveSpace()`, which a CanJoinAllSpaces window reports as `true` even
+//!   when stranded, so it never ran; and `apply` called Tauri's `show()`, which tao
+//!   implements as `makeKeyAndOrderFront:` — a key-status request from an app that
+//!   never activates, which pulls the window back to its original Space on every
+//!   keepalive tick.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Monitor, PhysicalPosition, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Monitor, PhysicalPosition, WebviewWindow,
+    WindowEvent,
 };
 
 /// Air between the top of the usable screen area and the overlay.
@@ -142,6 +153,26 @@ impl OverlayWindow {
     /// active Space permanently, and since an uncomposited webview has its timers
     /// throttled, the UI stops polling too. Both symptoms, one cause.
     pub fn install(&self, _app: &AppHandle) {
+        // Order matters, and it is the whole fix for fullscreen.
+        //
+        // The window is declared `"visible": false` in tauri.conf.json, so tao
+        // creates it without ordering it in. It is re-classed to an `NSPanel` here,
+        // and only then does `redock` order it front — so its *first* order-in
+        // happens as a panel.
+        //
+        // Doing it the other way round strands the overlay: a window whose first
+        // order-in happened as a plain `NSWindow` is assigned to the Space it was
+        // born on, and if a fullscreen Space was already active at launch it never
+        // migrates into it. No repair fixes that afterwards — not the
+        // orderOut/orderFrontRegardless bounce, not resetting the collection
+        // behaviour, not re-classing. Measured, not guessed: a panel that is a panel
+        // before it is first shown joins an already-active fullscreen Space every
+        // time.
+        //
+        // Both calls hop to the main thread through the same queue, so the promotion
+        // is guaranteed to land ahead of `redock`'s writes.
+        promote_to_panel(&self.inner.window);
+        watch_outside_clicks(&self.inner.window);
         self.redock();
         self.start_keepalive();
     }
@@ -286,6 +317,15 @@ impl OverlayWindow {
             // Reassertion is conditional on visibility — `orderFrontRegardless`
             // would otherwise un-hide a deliberately hidden window.
             if visible {
+                // Deliberately *not* `window.show()` on macOS: tao implements it as
+                // `makeKeyAndOrderFront:`, which asks for key status on behalf of an
+                // Accessory app that never activates. From another app's fullscreen
+                // Space that request is answered by ordering the window back into the
+                // Space it came from — and this runs on every keepalive tick, so the
+                // overlay is repeatedly pulled off the Space you are looking at.
+                // `reassert`'s `orderFrontRegardless` both shows and orders in, which
+                // is the call documented for windows of inactive applications.
+                #[cfg(not(target_os = "macos"))]
                 let _ = window.show();
                 reassert(window);
             } else {
@@ -346,13 +386,119 @@ fn dock_frame(monitor: &Monitor, size: LogicalSize<f64>, anchor: Anchor) -> Fram
     }
 }
 
+/// Re-class the window as a non-activating `NSPanel`. Once, at startup.
+///
+/// This is the only thing that gets the overlay onto another app's native-fullscreen
+/// Space. Collection behaviour and window level are not enough — with
+/// `CanJoinAllSpaces | FullScreenAuxiliary | CanJoinAllApplications` at level 101 and
+/// an `orderOut`/`orderFrontRegardless` bounce every two seconds, the readback still
+/// said `onActiveSpace=false` on every tick while VS Code was fullscreen. macOS
+/// admits a window to another application's fullscreen Space based on what *kind* of
+/// window it is, and the kind that qualifies is a non-activating panel.
+///
+/// `NSWindowStyleMaskNonactivatingPanel` is ignored on a plain `NSWindow`, which is
+/// why the class has to change and not just the mask.
+///
+/// # What re-classing costs
+///
+/// tao's window is its own `NSWindow` subclass, and swapping the class discards its
+/// overrides:
+///
+/// * `canBecomeKeyWindow` / `canBecomeMainWindow`, which returned tao's `focusable`
+///   ivar. `NSPanel` answers for itself; a *non-activating* panel does not activate
+///   the app when clicked, which is the property that actually mattered.
+/// * `sendEvent:`, which existed only to forward background drags for
+///   `movable_by_window_background`. This window is `decorations: false` and never
+///   movable by background — `dock_frame` owns the position.
+/// * The `focusable` ivar itself no longer exists, so `tao::Window::set_focusable`
+///   would be reading a field off a class that never declared it. Nothing calls it,
+///   and nothing may start: it is not reachable from the four commands at the bottom
+///   of this file, and the capability set does not grant the frontend any
+///   window-mutating permission.
+///
+/// Instance size is safe: `NSPanel` adds no ivars over `NSWindow`, and the object was
+/// allocated as `NSWindow` + one `Bool`.
+#[cfg(target_os = "macos")]
+fn promote_to_panel(window: &WebviewWindow) {
+    let window = window.clone();
+    let _ = window.clone().run_on_main_thread(move || {
+        use objc2::runtime::AnyObject;
+        use objc2::ClassType;
+        use objc2_app_kit::{NSPanel, NSWindow, NSWindowStyleMask};
+
+        let Ok(ptr) = window.ns_window() else { return };
+        if ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: main thread, non-null NSWindow subclass instance, and NSPanel is a
+        // subclass of NSWindow that declares no additional ivars.
+        let obj: &AnyObject = unsafe { &*(ptr as *const AnyObject) };
+        unsafe { AnyObject::set_class(obj, NSPanel::class()) };
+
+        let ns_window: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+        // OR'd into the existing mask rather than replacing it: the window is
+        // borderless and transparent, and that is expressed in this same mask.
+        ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::NonactivatingPanel);
+        // Panels default to hiding when their app deactivates, which for an overlay
+        // whose app is *never* active would mean never being seen again.
+        ns_window.setHidesOnDeactivate(false);
+
+        // ponytail: tao re-sets the first responder after a style-mask change, for key
+        // handling. Skipped — this window takes no keyboard input, and hover and
+        // clicks reach the view under the pointer regardless of first responder.
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn promote_to_panel(_window: &WebviewWindow) {}
+
+/// Tell the frontend when a click lands anywhere outside the overlay, so the
+/// expanded card can close itself.
+///
+/// The click that closes the card happens in *another application*, so the webview
+/// never receives it. The obvious hook — the window losing key status — does not
+/// exist here: the overlay is a non-activating panel belonging to an Accessory app
+/// that never activates, so it is never key in the first place (`key=false` in every
+/// trace line, clicked or not).
+///
+/// A global monitor is the remaining option, and it happens to be exactly the right
+/// predicate: it never sees its own application's events, so anything it reports is
+/// by definition a click somewhere else. Mouse events need no Accessibility
+/// permission — only keyboard monitoring does — so this costs the user no prompt.
+#[cfg(target_os = "macos")]
+fn watch_outside_clicks(window: &WebviewWindow) {
+    let window = window.clone();
+    let _ = window.clone().run_on_main_thread(move || {
+        use block2::RcBlock;
+        use objc2_app_kit::{NSEvent, NSEventMask};
+
+        let handler = RcBlock::new(move |_event: core::ptr::NonNull<NSEvent>| {
+            let _ = window.emit("overlay:blur", ());
+        });
+
+        let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown,
+            &handler,
+        );
+        // Dropping the token unregisters the monitor, and this one lives as long as
+        // the process does. One deliberately leaked object, not a growing leak.
+        std::mem::forget(token);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn watch_outside_clicks(_window: &WebviewWindow) {}
+
 /// Force the window back above everything, including fullscreen Spaces.
 ///
 /// Must run on the main thread — see the module header.
 fn reassert(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     {
-        use objc2_app_kit::{NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior};
+        use objc2_app_kit::{
+            NSPopUpMenuWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
+        };
 
         let Ok(ptr) = window.ns_window() else { return };
         if ptr.is_null() {
@@ -362,12 +508,30 @@ fn reassert(window: &WebviewWindow) {
 
         // tao only sets CanJoinAllSpaces. A fullscreen app owns its own Space, so
         // without FullScreenAuxiliary the overlay vanishes exactly when it matters.
+        //
+        // These flags come from four independent groups, and each answers a different
+        // question — which is why setting three of them left a gap:
+        //   CanJoinAllSpaces       which Spaces may it appear on
+        //   Stationary             does it move with the Space (Exposé)
+        //   FullScreenAuxiliary    what about *our own* fullscreen window
+        //   CanJoinAllApplications may it appear alongside *another app's* windows
+        //   IgnoresCycle           keep a never-focusable window out of window cycling
+        // Nothing said "another application", which is exactly the fullscreen case.
+        // CanJoinAllApplications is macOS 13+; older versions ignore the unknown bit,
+        // so it is safe against the 10.15 minimum in tauri.conf.json.
         ns_window.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary,
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::CanJoinAllApplications
+                | NSWindowCollectionBehavior::IgnoresCycle,
         );
-        ns_window.setLevel(NSStatusWindowLevel);
+        // One band above NSStatusWindowLevel (25). The status band is where macOS
+        // reshuffles windows as the menu bar reveals itself over a fullscreen Space;
+        // 101 sits clear of that. Deliberately far below NSScreenSaverWindowLevel
+        // (1000) and CGShieldingWindowLevel — the overlay must never be able to draw
+        // over the screen saver or the lock screen.
+        ns_window.setLevel(NSPopUpMenuWindowLevel);
 
         // The overlay is never the key window — it is an Accessory app that
         // deliberately does not activate — and a non-key window does not receive
@@ -375,28 +539,55 @@ fn reassert(window: &WebviewWindow) {
         // capsule to expand it does nothing.
         ns_window.setAcceptsMouseMovedEvents(true);
 
-        ns_window.orderFrontRegardless();
-
-        // Setting CanJoinAllSpaces on a window that is *already* ordered in does
-        // not re-associate it with the current Space: AppKit reports
-        // `isOnActiveSpace() == false` and the window is simply not composited,
-        // even though it is visible, at the right level and correctly configured.
-        // Ordering it out and straight back in forces the re-association.
+        // Ordering a window out and straight back in re-associates it with the
+        // current Space, and is the only repair for an overlay stranded on a Space
+        // that no longer has focus.
         //
-        // This is what strands the overlay on a Space that no longer has focus —
-        // leave a fullscreen app, and it stays behind on the Space it was born on.
-        if !ns_window.isOnActiveSpace() {
+        // It is also destructive, so it needs an honest predicate for "am I actually
+        // on screen", and two candidates are not:
+        //
+        //   `isVisible()`        true for a window nobody can see.
+        //   `isOnActiveSpace()`  a CanJoinAllSpaces window answers true even while
+        //                        stranded, so gating on it meant the repair never
+        //                        ran in the case it was written for.
+        //
+        // Running it unconditionally instead is worse: in another app's fullscreen
+        // Space the re-order does not always take, so a bounce every two seconds
+        // evicts the overlay from the Space the user is looking at and leaves it out.
+        //
+        // `occlusionState` is AppKit's own answer to "is any part of this window
+        // being displayed", and it agrees with what `CGWindowListCopyWindowInfo`
+        // reports for the on-screen list — which is the ground truth the other two
+        // disagree with.
+        if !ns_window
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible)
+        {
             ns_window.orderOut(None);
             ns_window.orderFrontRegardless();
         }
 
         if std::env::var("AGENTPEEK_TRACE").is_ok() {
+            // The frame is in the readback because "docked to the display the pointer
+            // is on, not the one the fullscreen app is on" looks identical to
+            // "invisible" from the outside, and only the origin tells them apart.
+            // The class is here because `promote_to_panel` swallows its own failures —
+            // it runs inside a main-thread closure whose errors go nowhere — so this
+            // is the only evidence that the re-class actually happened.
+            let class = unsafe { &*(ptr as *const objc2::runtime::AnyObject) }
+                .class()
+                .name()
+                .to_string_lossy()
+                .into_owned();
             eprintln!(
-                "[reassert] level={} behavior={:?} visible={} onActiveSpace={}",
+                "[reassert] class={class} key={} level={} behavior={:?} visible={} occlusion={:?} onActiveSpace={} frame={:?}",
+                ns_window.isKeyWindow(),
                 ns_window.level(),
                 ns_window.collectionBehavior(),
                 ns_window.isVisible(),
-                ns_window.isOnActiveSpace()
+                ns_window.occlusionState(),
+                ns_window.isOnActiveSpace(),
+                ns_window.frame()
             );
         }
     }

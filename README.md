@@ -5,7 +5,7 @@ terminal and only come back when something actually needs you.
 
 A card per live session on a real macOS glass surface: a status orb that animates what the agent is
 doing, the current activity, elapsed time, an activity timeline, and context usage. One card carries
-detail at a time — whichever session needs you, or whichever you hover. Sessions needing attention
+detail at a time — whichever session needs you, or whichever you click. Sessions needing attention
 sort to the top, tint amber, and fire a native notification on the transition.
 
 ```
@@ -96,6 +96,28 @@ The card appears within a second. Delete the file and it disappears.
 
 ## Notes
 
+- **Over fullscreen apps the overlay is an `NSPanel`.** A plain `NSWindow` does not join another
+  app's native-fullscreen Space, whatever its level or collection behaviour — with
+  `CanJoinAllSpaces | FullScreenAuxiliary | CanJoinAllApplications` at level 101 and an
+  `orderOut`/`orderFrontRegardless` bounce every two seconds, `CGWindowListCopyWindowInfo` still did
+  not list it as on-screen. macOS decides on the *kind* of window, and the kind that qualifies is a
+  non-activating panel, so [`overlay.rs`](src-tauri/src/overlay.rs) re-classes the tao window at
+  startup.
+- **The window is declared `"visible": false`** and shown only after that re-class. Order is the
+  whole fix: a window whose first order-in happened as a plain `NSWindow` is stuck on the Space it
+  was born on, so launching while a fullscreen app was already frontmost meant the overlay never
+  appeared there and nothing repaired it afterwards. Promote first, show second.
+- **AppKit is no use for diagnosing any of this.** `isVisible` and `isOnActiveSpace` both report a
+  perfectly healthy window that is not being composited — `isOnActiveSpace` in particular answers
+  `true` for a `CanJoinAllSpaces` window stranded on a Space you left, which is why the repair it
+  used to gate never ran. `occlusionState` is the one AppKit signal that agrees with
+  `CGWindowListCopyWindowInfo`, and the on-screen list is the ground truth worth checking.
+- **Click the card to expand it, click anywhere else to close it.** That outside click lands in
+  another application, so the webview never sees it, and the usual hook — the window losing key
+  status — does not exist either: a non-activating panel owned by an app that never activates is
+  never key to begin with. A global `NSEvent` monitor is what remains, and it is exactly the right
+  predicate, since it never reports its own application's events. Mouse monitoring needs no
+  Accessibility permission.
 - **Stale sessions.** A session killed with `kill -9` never fires `SessionEnd`, so any session quiet
   for 10 minutes is dropped — unless it is waiting on you, which is the one state that must never be
   silently hidden.

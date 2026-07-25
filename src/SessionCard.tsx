@@ -39,7 +39,12 @@ export const SessionCard = memo(function SessionCard({ session }: { session: Ses
               it wraps rather than truncating into an ellipsis. */}
           <p className="mt-2 text-[11px] leading-[16px] text-white/80">{session.message}</p>
           <button
-            onClick={() => focusTerminal(session.terminalApp)}
+            // Stops the shell's toggle from also firing — bringing the terminal
+            // forward should not collapse the card on the way out.
+            onClick={(e) => {
+              e.stopPropagation();
+              focusTerminal(session.terminalApp);
+            }}
             disabled={!session.terminalApp}
             className="mt-2.5 rounded-md border border-amber-400/35 bg-amber-400/12 px-2.5 py-[5px] text-[10.5px] leading-none font-medium text-amber-200/90 transition-colors hover:bg-amber-400/20 disabled:opacity-40"
           >
