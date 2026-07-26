@@ -12,6 +12,10 @@ import { invoke } from '@tauri-apps/api/core';
 export const overlayResize = (width: number, height: number) =>
   invoke('overlay_resize', { width, height }).catch(() => {});
 
+/** Nudge the overlay by a pointer delta. The manager decides where that lands. */
+export const overlayMoveBy = (dx: number, dy: number) =>
+  invoke('overlay_move_by', { dx, dy }).catch(() => {});
+
 export const overlayShow = () => invoke('overlay_show').catch(() => {});
 
 export const overlayHide = () => invoke('overlay_hide').catch(() => {});

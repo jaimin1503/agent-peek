@@ -167,6 +167,7 @@ pub fn run() {
             focus_app,
             quit,
             overlay::overlay_resize,
+            overlay::overlay_move_by,
             overlay::overlay_show,
             overlay::overlay_hide,
             overlay::overlay_is_visible,

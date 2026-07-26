@@ -47,13 +47,20 @@ export interface SessionState {
 /** Statuses that mean "stop what you're doing and come back". */
 export const NEEDS_ATTENTION: Status[] = ['permission', 'question', 'error'];
 
-/** Worst-first, so the tray icon and sort order agree on what matters. */
+/**
+ * Worst-first: what wants you, then what is still moving, then what is done.
+ *
+ * `completed` ranks below `working` on purpose. A finished session lingers 15s
+ * (see COMPLETED_HOLD_MS) and the capsule shows whichever session sorts first,
+ * so ranking it higher meant a live agent's progress was hidden behind a card
+ * about work that had already ended.
+ */
 export const SEVERITY: Record<Status, number> = {
   error: 4,
   permission: 3,
   question: 3,
-  completed: 2,
-  working: 1,
+  working: 2,
+  completed: 1,
   idle: 0,
 };
 

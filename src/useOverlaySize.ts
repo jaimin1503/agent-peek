@@ -22,12 +22,12 @@ export function useOverlaySize<T extends HTMLElement>() {
     const el = ref.current;
     if (!el) return;
 
-    let reported = 0;
+    let reported = { width: 0, height: 0 };
     let shrinkTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const report = (width: number, height: number) => {
-      reported = height;
-      overlayResize(width, height);
+    const report = (size: { width: number; height: number }) => {
+      reported = size;
+      overlayResize(size.width, size.height);
     };
 
     const measure = () => ({
@@ -35,13 +35,21 @@ export function useOverlaySize<T extends HTMLElement>() {
       height: Math.ceil(el.getBoundingClientRect().height),
     });
 
+    // Both axes matter. The capsule changes width without changing height all the
+    // time — a longer message, elapsed ticking 9m -> 10m — and watching height
+    // alone left those resizes unreported until the next expand happened to move
+    // it too, so the text sat clipped by a window that had stopped following.
     const observer = new ResizeObserver(() => {
-      const { width, height } = measure();
-      if (!height || Math.abs(height - reported) < EPSILON) return;
+      const size = measure();
+      if (!size.height) return;
+
+      const dw = size.width - reported.width;
+      const dh = size.height - reported.height;
+      if (Math.abs(dw) < EPSILON && Math.abs(dh) < EPSILON) return;
 
       clearTimeout(shrinkTimer);
-      if (height > reported) report(width, height);
-      else shrinkTimer = setTimeout(() => report(width, height), SHRINK_DELAY_MS);
+      if (dw > 0 || dh > 0) report(size);
+      else shrinkTimer = setTimeout(() => report(size), SHRINK_DELAY_MS);
     });
     observer.observe(el);
 

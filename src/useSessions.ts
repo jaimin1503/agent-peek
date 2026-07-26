@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BaseDirectory, exists, readDir, readTextFile } from '@tauri-apps/plugin-fs';
 import { SEVERITY, needsAttention, type SessionState } from './protocol';
 
@@ -53,8 +53,26 @@ async function readAll(): Promise<SessionState[]> {
     .sort((a, b) => SEVERITY[b.status] - SEVERITY[a.status] || b.updatedAt - a.updatedAt);
 }
 
-export function useSessions(): SessionState[] {
+export interface Sessions {
+  sessions: SessionState[];
+  /** Stop showing this session for the rest of the run. */
+  dismiss: (sessionId: string) => void;
+}
+
+export function useSessions(): Sessions {
   const [sessions, setSessions] = useState<SessionState[]>([]);
+  /**
+   * Sessions you have told the overlay to stop tracking. A ref, so dismissing
+   * does not restart the poll loop, and deliberately not persisted — the ids are
+   * per-run and a set that outlived them would only grow.
+   */
+  const dismissed = useRef(new Set<string>());
+
+  const dismiss = useCallback((sessionId: string) => {
+    dismissed.current.add(sessionId);
+    // Drop it now rather than waiting up to a second for the next poll.
+    setSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -66,7 +84,12 @@ export function useSessions(): SessionState[] {
     // itself, and one failed poll does not kill the loop.
     const tick = async () => {
       try {
-        const found = await readAll();
+        // Filtered before anything else sees them, and before `holding` is
+        // updated, so a dismissed session cannot come back through the 15s
+        // completed-hold. Doing it here rather than at the render site is what
+        // makes "stop tracking" also silence its notifications and drop it from
+        // the tray count — App.tsx feeds this same array to both.
+        const found = (await readAll()).filter((s) => !dismissed.current.has(s.sessionId));
         const now = Date.now();
 
         for (const s of found) {
@@ -99,5 +122,5 @@ export function useSessions(): SessionState[] {
     };
   }, []);
 
-  return sessions;
+  return { sessions, dismiss };
 }

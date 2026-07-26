@@ -17,7 +17,13 @@ function focusTerminal(app?: string | null) {
  * a real character grid cannot survive variable-length, truncated filenames —
  * but everything that is *content* stays a character.
  */
-export const SessionCard = memo(function SessionCard({ session }: { session: SessionState }) {
+export const SessionCard = memo(function SessionCard({
+  session,
+  onDismiss,
+}: {
+  session: SessionState;
+  onDismiss: (sessionId: string) => void;
+}) {
   const activity = activityOf(session);
   const attention = needsAttention(session);
   const files = filesModified(session);
@@ -31,6 +37,22 @@ export const SessionCard = memo(function SessionCard({ session }: { session: Ses
         <span className="shrink-0 font-medium text-white/85">{projectName(session)}</span>
         <span className="rule" />
         <Elapsed startedAt={session.startedAt} frozen={done ? session.updatedAt : undefined} />
+        {/* The escape hatch for a session that will never resolve itself — a
+            dead process still holding a `permission` card, which the stale sweep
+            deliberately refuses to drop. */}
+        <button
+          // stopPropagation twice over: the pointerdown would otherwise start a
+          // window drag, and the click would toggle the card shut on the way out.
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(session.sessionId);
+          }}
+          title="stop tracking"
+          className="-my-1 -mr-1 shrink-0 px-1 py-1 leading-none text-white/25 transition-colors hover:text-white/70"
+        >
+          ×
+        </button>
       </div>
 
       {attention ? (
@@ -40,7 +62,9 @@ export const SessionCard = memo(function SessionCard({ session }: { session: Ses
           <p className="mt-2 text-[11px] leading-[16px] text-white/80">{session.message}</p>
           <button
             // Stops the shell's toggle from also firing — bringing the terminal
-            // forward should not collapse the card on the way out.
+            // forward should not collapse the card on the way out — and stops a
+            // press on it from starting a window drag.
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               focusTerminal(session.terminalApp);

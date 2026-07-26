@@ -44,6 +44,12 @@ body,
   user-select: none;
 }
 
+/* The blanket `default` above is what made every control in the panel read as
+   decoration. Enabled buttons are the exception; a disabled one is honest. */
+button:not(:disabled) {
+  cursor: pointer;
+}
+
 /* ── Surface ─────────────────────────────────────────────────────────────────
    Opaque, not vibrancy. The window keeps a transparent margin so the panel can
    cast its own shadow and read as floating rather than pasted on.             */

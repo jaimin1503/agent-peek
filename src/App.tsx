@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { AnimatePresence, motion } from 'motion/react';
 import { useSessions } from './useSessions';
 import { useOverlaySize } from './useOverlaySize';
+import { useDragMove } from './useDragMove';
 import { Capsule } from './Capsule';
 import { SessionCard } from './SessionCard';
 import { notifyChanges } from './notify';
@@ -13,9 +14,11 @@ import './App.css';
 const SPRING = { type: 'spring', stiffness: 380, damping: 34 } as const;
 
 export default function App() {
-  const sessions = useSessions();
+  const { sessions, dismiss } = useSessions();
   const shell = useOverlaySize<HTMLDivElement>();
-  const [open, setOpen] = useState(false);
+  const { dragged, handlers } = useDragMove();
+  /** `null` means "follow attention"; true and false are you overruling it. */
+  const [open, setOpen] = useState<boolean | null>(null);
 
   useEffect(() => {
     notifyChanges(sessions);
@@ -37,11 +40,23 @@ export default function App() {
   const attention = sessions.some(needsAttention);
 
   /**
-   * Expansion is derived, not scheduled. The click is you asking; attention is
-   * the one moment the app exists for, so it opens itself and closes again when
-   * the session stops waiting — no timers to get wrong.
+   * Expansion is derived, not scheduled. Attention is the one moment the app
+   * exists for, so it opens itself — but you can always overrule that, and the
+   * override outlives the alert that provoked it. No timers to get wrong.
    */
-  const expanded = open || attention;
+  const expanded = open ?? attention;
+
+  /**
+   * Back to following attention on its *rising* edge only. Collapsing during an
+   * alert has to stick, or the panel fights you every poll while a session waits
+   * at `permission` — but the next alert is new information and gets to open the
+   * panel again.
+   */
+  const wasAttention = useRef(attention);
+  useEffect(() => {
+    if (attention && !wasAttention.current) setOpen(null);
+    wasAttention.current = attention;
+  }, [attention]);
 
   /** Attention first, else the most recently active. Sessions arrive sorted. */
   const lead = useMemo(() => sessions.find(needsAttention) ?? sessions[0], [sessions]);
@@ -52,7 +67,11 @@ export default function App() {
     <div
       ref={shell}
       className="shell inline-block"
-      onClick={() => setOpen((wasOpen) => !wasOpen)}
+      {...handlers}
+      // A press that moved the window was a drag, not a click on the card.
+      onClick={() => {
+        if (!dragged.current) setOpen(!expanded);
+      }}
     >
       <motion.div
         layout
@@ -80,8 +99,21 @@ export default function App() {
               className="w-[330px] divide-y divide-white/6"
             >
               {sessions.map((s) => (
-                <SessionCard key={s.sessionId} session={s} />
+                <SessionCard key={s.sessionId} session={s} onDismiss={dismiss} />
               ))}
+              {/* Panel-level, unlike the per-card ×: this closes the whole thing,
+                  and it is the only way back out while a session wants you. */}
+              <button
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpen(false);
+                }}
+                title="collapse"
+                className="w-full py-1 text-[11px] leading-none text-white/25 transition-colors hover:bg-white/5 hover:text-white/50"
+              >
+                ⌄
+              </button>
             </motion.div>
           ) : (
             <motion.div

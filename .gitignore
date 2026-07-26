@@ -26,3 +26,6 @@ dist-ssr
 # Per-developer Claude Code permissions. `.claude/settings.json` is the shared
 # project config and stays tracked; only the `.local` half is personal.
 .claude/settings.local.json
+
+# Local demo driver for recording the overlay — writes fake session files.
+scripts/demo.cjs

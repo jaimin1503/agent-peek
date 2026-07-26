@@ -21,6 +21,21 @@
 //!    triggers a redock; the `docking` flag breaks that loop.
 //! 5. **Exactly one code path changes the frame** — `apply`.
 //!
+//! # Being dragged
+//!
+//! The overlay docks itself, so a user-chosen position has to be a *mode* of the
+//! docking rather than an escape from it — otherwise the 2s keepalive drags it
+//! straight back. `Anchor::Free` is that mode: `move_by` accumulates pointer
+//! deltas into it, `dock_frame` clamps it to the work area, and `redock` folds
+//! the clamped result back into the anchor so an overshoot cannot accrue an
+//! invisible offset. Everything else — ordering, level, Space behaviour — is
+//! untouched, and the frame is still only ever written by `apply`.
+//!
+//! ponytail: in memory only, so it docks top-centre again on relaunch.
+//! Persisting it means a file to write, version, and repair when it names a
+//! display that is no longer attached — worth it only if re-dragging after every
+//! restart becomes a real annoyance.
+//!
 //! # Windows and Linux
 //!
 //! Everything below with a macOS `cfg` is a no-op there, and the contract is
@@ -96,11 +111,18 @@ const EPSILON: f64 = 1.0;
 /// Space change or a wake-from-sleep, neither of which raises an event.
 const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Where the overlay sits. Only one variant today, but naming it keeps the
-/// docking maths from being implicitly "top centre" everywhere.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where the overlay sits.
+///
+/// `Free` is what a drag produces, and it changes more than the origin: the
+/// monitor lookup stops following the pointer (see `target_monitor`), because a
+/// window you deliberately put somewhere must not migrate to whichever display
+/// the mouse later wandered onto.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
     TopCentre,
+    /// Where the user dragged it, in global logical points. Always the clamped
+    /// value — `redock` writes back what `dock_frame` decided was on screen.
+    Free { x: f64, y: f64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -228,6 +250,33 @@ impl OverlayWindow {
         self.redock();
     }
 
+    /// Nudge the overlay by a pointer delta. The frontend's second lever.
+    ///
+    /// Deltas rather than an absolute position: the frontend has no idea where
+    /// the window actually is — that is this module's business — and a sum of
+    /// deltas is order-independent, so nothing breaks if two of these land out
+    /// of order.
+    pub fn move_by(&self, dx: f64, dy: f64) {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let (x, y) = match state.anchor {
+                Anchor::Free { x, y } => (x, y),
+                // The first drag converts wherever docking last put it into a
+                // free position. No frame yet means nothing has ever been
+                // written, so there is nothing to drag from.
+                Anchor::TopCentre => match state.frame {
+                    Some(frame) => (frame.x, frame.y),
+                    None => return,
+                },
+            };
+            state.anchor = Anchor::Free {
+                x: x + dx,
+                y: y + dy,
+            };
+        }
+        self.redock();
+    }
+
     pub fn show(&self) {
         {
             let mut state = self.inner.state.lock().unwrap();
@@ -271,7 +320,7 @@ impl OverlayWindow {
             (state.desired, state.anchor, state.frame, state.visible)
         };
 
-        let Some(monitor) = self.target_monitor() else {
+        let Some(monitor) = self.target_monitor(anchor) else {
             // No monitor is a transient condition (display asleep, mid-reconfigure).
             // Leave the window alone rather than parking it at a guessed origin.
             return;
@@ -293,6 +342,16 @@ impl OverlayWindow {
             if move_frame {
                 state.frame = Some(frame);
             }
+            // Fold the clamp back into the anchor, every time — not just when the
+            // frame moved. Letting the anchor drift past the edge it was clamped
+            // to means a drag that overshoots builds up an invisible offset, and
+            // dragging back does nothing until it has been paid off.
+            if let Anchor::Free { .. } = state.anchor {
+                state.anchor = Anchor::Free {
+                    x: frame.x,
+                    y: frame.y,
+                };
+            }
             state.monitor = monitor_name;
         }
         self.apply(frame, visible, move_frame);
@@ -303,8 +362,18 @@ impl OverlayWindow {
     /// The one under the pointer, because that is where attention is. Falling
     /// back to the window's own monitor and then the primary keeps this working
     /// when the pointer is off-screen or a display just went away.
-    fn target_monitor(&self) -> Option<Monitor> {
+    ///
+    /// Once dragged, none of that applies: the display it is *on* is the answer,
+    /// and following the pointer would yank it off the screen you parked it on
+    /// the moment you moved the mouse elsewhere.
+    fn target_monitor(&self, anchor: Anchor) -> Option<Monitor> {
         let window = &self.inner.window;
+        if let Anchor::Free { .. } = anchor {
+            if let Ok(Some(monitor)) = window.current_monitor() {
+                return Some(monitor);
+            }
+            return window.primary_monitor().ok().flatten();
+        }
         if let Ok(PhysicalPosition { x, y }) = window.cursor_position() {
             if let Ok(Some(monitor)) = window.monitor_from_point(x, y) {
                 return Some(monitor);
@@ -391,11 +460,13 @@ impl OverlayWindow {
     }
 }
 
-/// Top-centred within the monitor's *usable* area.
+/// Placed within the monitor's *usable* area.
 ///
 /// `work_area` already excludes the menu bar and the Dock, and it does so per
 /// display — which is why this is computed here rather than in the frontend,
-/// where the menu bar height would have to be a hardcoded guess.
+/// where the menu bar height would have to be a hardcoded guess. It is also what
+/// keeps a dragged overlay reachable: the clamp below is against the usable area,
+/// so it can be parked at the top of the screen without going under the menu bar.
 fn dock_frame(monitor: &Monitor, size: LogicalSize<f64>, anchor: Anchor) -> Frame {
     let scale = monitor.scale_factor();
     let area = monitor.work_area();
@@ -404,11 +475,25 @@ fn dock_frame(monitor: &Monitor, size: LogicalSize<f64>, anchor: Anchor) -> Fram
     let area_x = area.position.x as f64 / scale;
     let area_y = area.position.y as f64 / scale;
     let area_width = area.size.width as f64 / scale;
+    let area_height = area.size.height as f64 / scale;
 
     match anchor {
         Anchor::TopCentre => Frame {
             x: (area_x + (area_width - size.width) / 2.0).round(),
             y: (area_y + TOP_GAP).round(),
+            width: size.width,
+            height: size.height,
+        },
+        // `.max(area_x)` and `.max(area_y)`, because a panel taller or wider than
+        // the work area gives an upper bound below the lower one, and `clamp`
+        // panics on that rather than picking a side.
+        Anchor::Free { x, y } => Frame {
+            x: x
+                .clamp(area_x, (area_x + area_width - size.width).max(area_x))
+                .round(),
+            y: y
+                .clamp(area_y, (area_y + area_height - size.height).max(area_y))
+                .round(),
             width: size.width,
             height: size.height,
         },
@@ -438,7 +523,8 @@ fn dock_frame(monitor: &Monitor, size: LogicalSize<f64>, anchor: Anchor) -> Fram
 ///   the app when clicked, which is the property that actually mattered.
 /// * `sendEvent:`, which existed only to forward background drags for
 ///   `movable_by_window_background`. This window is `decorations: false` and never
-///   movable by background — `dock_frame` owns the position.
+///   movable by background — `dock_frame` owns the position, and the drag support
+///   above goes through `move_by` rather than AppKit's own window dragging.
 /// * The `focusable` ivar itself no longer exists, so `tao::Window::set_focusable`
 ///   would be reading a field off a class that never declared it. Nothing calls it,
 ///   and nothing may start: it is not reachable from the four commands at the bottom
@@ -634,6 +720,11 @@ fn reassert(window: &WebviewWindow) {
 #[tauri::command]
 pub fn overlay_resize(overlay: tauri::State<'_, OverlayWindow>, width: f64, height: f64) {
     overlay.resize(width, height);
+}
+
+#[tauri::command]
+pub fn overlay_move_by(overlay: tauri::State<'_, OverlayWindow>, dx: f64, dy: f64) {
+    overlay.move_by(dx, dy);
 }
 
 #[tauri::command]
