@@ -22,7 +22,11 @@ jobs:
           - platform: macos-14
             target: aarch64-apple-darwin
             label: macOS (Apple Silicon)
-          - platform: macos-13
+          # Cross-compiled from the arm64 runner rather than built natively on
+          # macos-13: that image has been retired and the job sat unclaimed
+          # ("Waiting for a runner to pick up this job...") for the whole run.
+          # Xcode ships both SDKs, so an x86_64 target on macos-14 is enough.
+          - platform: macos-14
             target: x86_64-apple-darwin
             label: macOS (Intel)
           - platform: windows-latest
