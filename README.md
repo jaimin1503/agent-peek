@@ -81,6 +81,8 @@ In any Claude Code session:
 
 ```
 /plugin marketplace add jaimin1503/agent-peek
+```
+```
 /plugin install agentpeek@agentpeek
 ```
 
