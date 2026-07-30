@@ -25,6 +25,16 @@
         "shadow": false,
         "visibleOnAllWorkspaces": true,
         "visible": false
+      },
+      {
+        "label": "history",
+        "title": "AgentPeek History",
+        "url": "history.html",
+        "width": 940,
+        "height": 620,
+        "minWidth": 720,
+        "minHeight": 420,
+        "visible": false
       }
     ],
     "security": {

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BaseDirectory, exists, readDir, readTextFile } from '@tauri-apps/plugin-fs';
 import { SEVERITY, needsAttention, type SessionState } from './protocol';
 
-const DIR = '.agentpeek/sessions';
+export const LIVE_DIR = '.agentpeek/sessions';
+/** Where the hook parks a session once it ends. Same JSON, read by the history window. */
+export const HISTORY_DIR = '.agentpeek/history';
 
 // ponytail: polled, not watched. tauri-plugin-fs puts watching behind a
 // non-default cargo feature (notify + a debouncer); re-reading a handful of
@@ -28,17 +30,22 @@ function isLive(s: SessionState, now: number): boolean {
   return needsAttention(s) || now - s.updatedAt < STALE_MS;
 }
 
-async function readAll(): Promise<SessionState[]> {
-  if (!(await exists(DIR, { baseDir: BaseDirectory.Home }))) return [];
+/**
+ * Every session file in one directory. Shared with the history window, which
+ * reads the same shape out of `history/` — the only difference between the two
+ * directories is whether the session is still running.
+ */
+export async function readSessionDir(dir: string): Promise<SessionState[]> {
+  if (!(await exists(dir, { baseDir: BaseDirectory.Home }))) return [];
 
-  const entries = await readDir(DIR, { baseDir: BaseDirectory.Home });
+  const entries = await readDir(dir, { baseDir: BaseDirectory.Home });
   const sessions = await Promise.all(
     entries
       .filter((e) => e.isFile && e.name.endsWith('.json'))
       .map(async (e) => {
         try {
           return JSON.parse(
-            await readTextFile(`${DIR}/${e.name}`, { baseDir: BaseDirectory.Home })
+            await readTextFile(`${dir}/${e.name}`, { baseDir: BaseDirectory.Home })
           ) as SessionState;
         } catch {
           // Deleted or mid-write. The next poll re-reads it.
@@ -46,9 +53,12 @@ async function readAll(): Promise<SessionState[]> {
         }
       })
   );
+  return sessions.filter(Boolean) as SessionState[];
+}
 
+async function readAll(): Promise<SessionState[]> {
   const now = Date.now();
-  return (sessions.filter(Boolean) as SessionState[])
+  return (await readSessionDir(LIVE_DIR))
     .filter((s) => isLive(s, now))
     .sort((a, b) => SEVERITY[b.status] - SEVERITY[a.status] || b.updatedAt - a.updatedAt);
 }

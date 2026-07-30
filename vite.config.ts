@@ -9,6 +9,18 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
 
+  // Two windows, two entries. The overlay and the history window share
+  // components but not a document: App.css sizes html/body from their content so
+  // the overlay can be measured, which a real window must not inherit.
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        history: "history.html",
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

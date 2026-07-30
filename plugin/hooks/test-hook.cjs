@@ -11,8 +11,13 @@ const h = require('./agentpeek-hook.cjs');
 
 const ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const FILE = path.join(h.SESSIONS, ID + '.json');
+const ARCHIVED = path.join(h.HISTORY, ID + '.json');
 const read = () => JSON.parse(fs.readFileSync(FILE, 'utf8'));
-const cleanup = () => fs.rmSync(FILE, { force: true });
+const readArchived = () => JSON.parse(fs.readFileSync(ARCHIVED, 'utf8'));
+const cleanup = () => {
+  fs.rmSync(FILE, { force: true });
+  fs.rmSync(ARCHIVED, { force: true });
+};
 
 cleanup();
 
@@ -185,10 +190,10 @@ fs.writeFileSync(
     JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5', usage: { input_tokens: 1, cache_read_input_tokens: 10, cache_creation_input_tokens: 100, output_tokens: 1000 } } }),
   ].join('\n') + '\n'
 );
-assert.deepEqual(h.readTokens(transcript), { used: 1111, max: 200_000 });
+assert.deepEqual(h.readTokens(transcript), { used: 1111, max: 200_000, model: 'claude-opus-5' });
 
 fs.appendFileSync(transcript, JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5[1m]', usage: { output_tokens: 5 } } }) + '\n');
-assert.deepEqual(h.readTokens(transcript), { used: 5, max: 1_000_000 }, 'the 1M variant reports the wider window');
+assert.deepEqual(h.readTokens(transcript), { used: 5, max: 1_000_000, model: 'claude-opus-5[1m]' }, 'the 1M variant reports the wider window');
 
 // A 1M session can record a plain model id with no suffix, so usage above the
 // smaller window is what proves which window it is. Without this the overlay
@@ -197,22 +202,49 @@ fs.writeFileSync(
   transcript,
   JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5', usage: { input_tokens: 485_000 } } }) + '\n'
 );
-assert.deepEqual(h.readTokens(transcript), { used: 485_000, max: 1_000_000 }, 'usage over 200k implies the wide window');
+assert.deepEqual(h.readTokens(transcript), { used: 485_000, max: 1_000_000, model: 'claude-opus-5' }, 'usage over 200k implies the wide window');
 
 fs.writeFileSync(
   transcript,
   JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5', usage: { input_tokens: 145_000 } } }) + '\n'
 );
-assert.deepEqual(h.readTokens(transcript), { used: 145_000, max: 200_000 }, 'usage under 200k stays on the narrow window');
+assert.deepEqual(h.readTokens(transcript), { used: 145_000, max: 200_000, model: 'claude-opus-5' }, 'usage under 200k stays on the narrow window');
 
 assert.equal(h.readTokens('/nonexistent/path.jsonl'), null);
 fs.rmSync(transcript, { force: true });
 
-// --- SessionEnd removes the file -------------------------------------------
+// --- SessionEnd archives the session ----------------------------------------
 h.apply({ hook_event_name: 'SessionStart', session_id: ID, cwd: '/tmp/p' });
+h.apply({ hook_event_name: 'PreToolUse', session_id: ID, tool_name: 'Edit', tool_input: { file_path: '/p/Foo.kt' } });
 assert.ok(fs.existsSync(FILE), 'a session exists to be ended');
+
 h.apply({ hook_event_name: 'SessionEnd', session_id: ID });
-assert.ok(!fs.existsSync(FILE), 'SessionEnd clears the session');
+assert.ok(!fs.existsSync(FILE), 'SessionEnd clears the live session — the overlay reads that as "over"');
+assert.ok(fs.existsSync(ARCHIVED), 'and keeps it in history/');
+assert.equal(readArchived().cwd, '/tmp/p', 'the archived copy is the same shape, not a summary');
+assert.deepEqual(readArchived().events.map((e) => e.kind), ['start', 'edit'], 'history keeps the event log');
+assert.ok(readArchived().endedAt >= readArchived().startedAt, 'and is stamped with when it ended');
+
+// Ending a session that was never tracked must not create an empty archive.
+cleanup();
+h.apply({ hook_event_name: 'SessionEnd', session_id: ID });
+assert.ok(!fs.existsSync(ARCHIVED), 'nothing to archive means no file');
+
+// --- the stale sweep --------------------------------------------------------
+// A killed process never fires SessionEnd. Without the sweep its file sits in
+// sessions/ forever and the session is missing from history entirely.
+cleanup();
+h.apply({ hook_event_name: 'SessionStart', session_id: ID, cwd: '/tmp/killed' });
+
+const fresh = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+h.sweep(Date.now());
+assert.ok(fs.existsSync(FILE), 'a session that is still alive is left alone');
+
+const quiet = Date.now() - h.STALE_MS - 1000;
+fs.writeFileSync(FILE, JSON.stringify({ ...fresh, updatedAt: quiet }));
+h.sweep(Date.now());
+assert.ok(!fs.existsSync(FILE), 'a session quiet for STALE_MS is swept out of sessions/');
+assert.equal(readArchived().endedAt, quiet, 'and ends when it went quiet, not when it was noticed');
 
 cleanup();
 console.log('ok — all hook tests passed');

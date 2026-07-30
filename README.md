@@ -26,6 +26,28 @@ sort to the top, tint amber, and fire a native notification on the transition.
 The window sizes itself to its content, so it is a 40px pill when idle and only as tall as it needs
 to be otherwise.
 
+## Session history
+
+Sessions are kept after they end. **Session History…** in the tray menu opens a window over every
+session AgentPeek has ever seen: search, projects, per-range statistics, and the full timeline,
+files, model and context for any one of them.
+
+```
+ Today          search: overlay.rs
+ Yesterday      ┌───────────────────────────────────────────────────────┐
+ This Week      │  12 sessions   4h 18m   21m avg   83% completed       │
+ Everything     ├───────────────────────────────────────────────────────┤
+                │ ▸ AgentPeek    completed  Finished    2f  42m  today  │
+ Projects       │ ▾ CameraApp    error      3 failures  1f  13m  Mar 4  │
+   AgentPeek 42 │    09:14 ├─ start                                     │
+   CameraApp 12 │    09:16 ├─ read ....... ColorProcessor.kt            │
+                │    09:31 └─ fail ....... 3 tool failures in a row     │
+                └───────────────────────────────────────────────────────┘
+```
+
+Search ANDs its terms and matches the project, path, status, every touched file and every timeline
+label, so `overlay.rs test` finds the sessions that both edited that file and ran tests.
+
 ## How it works
 
 A Claude Code plugin hook appends an `AgentEvent` to one JSON file per session in
@@ -33,8 +55,16 @@ A Claude Code plugin hook appends an `AgentEvent` to one JSON file per session i
 no ports, no daemon — which also means multiple concurrent sessions and app restarts work with no
 extra machinery.
 
+When a session ends the hook moves its file to `~/.agentpeek/history/` — same JSON, same shape,
+stamped with `endedAt`. That directory is the history window's entire database: there is no SQLite
+and no schema, because the session files were already the event-sourced record.
+
 ```
 Claude Code ──hook──► ~/.agentpeek/sessions/<id>.json ──poll──► overlay + tray + notifications
+                                    │
+                              on SessionEnd
+                                    ▼
+                       ~/.agentpeek/history/<id>.json ──read──► history window
 ```
 
 Each file carries an append-only `events[]` (the canonical record, last 50) plus the state derived
@@ -187,6 +217,9 @@ EOF
 The card appears within a second. Delete the file and it disappears. On Windows the same file goes in
 `%USERPROFILE%\.agentpeek\sessions\`; use `"terminalApp": "WindowsTerminal.exe"` to exercise the
 button.
+
+The same file in `~/.agentpeek/history/` instead — plus an `"endedAt"` — is a history row. The
+history window re-reads both directories every time it comes to the front, so no restart is needed.
 
 ## Notes
 

@@ -187,6 +187,22 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // The history window is an ordinary window and shares none of the
+            // overlay's behaviour. Forwarding its events would redock the overlay
+            // whenever history moved, and — off macOS, where losing focus is how
+            // an outside click is detected — collapse the overlay panel every
+            // time history was dismissed.
+            if window.label() == "history" {
+                // Hidden, not destroyed: the tray reopens it by label, and a
+                // closed window is gone for the rest of the run. Closing the last
+                // window would also exit the app, which for a menu bar app is
+                // never what the red button means.
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                return;
+            }
             if let Some(overlay) = window.app_handle().try_state::<OverlayWindow>() {
                 overlay.handle_window_event(event);
             }

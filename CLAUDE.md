@@ -43,6 +43,10 @@ Three processes, one file per session, no server:
 
 ```
 Claude Code ──hook──► ~/.agentpeek/sessions/<uuid>.json ──poll 1s──► overlay + tray + notifications
+                                   │
+                             on SessionEnd
+                                   ▼
+                      ~/.agentpeek/history/<uuid>.json ──read on focus──► history window
 ```
 
 **1. `plugin/hooks/agentpeek-hook.cjs`** — a Claude Code plugin hook wired to 7 lifecycle events
@@ -57,11 +61,25 @@ Rules it must keep:
 - **It is the reducer.** All classification (`describeTool`, `classifyKind`, error streaks, token
   parsing) happens here. The session file's non-`events` fields are a materialised view of `events[]`,
   not a second source of truth. The UI is a pure renderer and never re-inspects tool names.
+- **It owns the whole lifecycle of a session file.** `SessionEnd` *archives* (`archive()`: write
+  `history/`, then unlink `sessions/` — in that order, so a crash loses the live copy and not the
+  permanent one). `SessionStart` also runs `sweep()`, which archives anything in `sessions/` quiet for
+  longer than `STALE_MS` — a killed process never fires `SessionEnd`, and nothing else would ever move
+  its file.
 
-**2. `src/` (React)** — `useSessions.ts` polls, filters stale sessions and holds completed cards for
-15s; `App.tsx` derives capsule-vs-expanded from click + attention (no timers — clicking the shell
-toggles, and an outside click arrives as the `overlay:blur` event described below); `activity.ts` maps
-`EventKind`/`Status` to the orb animation and timeline captions.
+**2. `src/` (React)** — two entries, two windows, shared components.
+- **Overlay** (`index.html` → `main.tsx`): `useSessions.ts` polls, filters stale sessions and holds
+  completed cards for 15s; `App.tsx` derives capsule-vs-expanded from click + attention (no timers —
+  clicking the shell toggles, and an outside click arrives as the `overlay:blur` event described
+  below); `activity.ts` maps `EventKind`/`Status` to the orb animation and timeline captions.
+- **History** (`history.html` → `History.tsx`): an ordinary window, opened from the tray, hidden
+  rather than closed (see `on_window_event` in `lib.rs`). It reads `history/` + `sessions/` through
+  `readSessionDir` on mount and on every `focus`, then does search/projects/stats with `filter` and
+  `reduce` — there is no database, and `History.css` exists only to undo App.css's `max-content`
+  html/body, which is an overlay-measurement trick a real window must not inherit.
+- Anything new that renders sessions belongs in a shared component, not a second copy: `Timeline`
+  takes `limit`/`time` props precisely so the overlay's 4-row tail and history's full timestamped log
+  are the same component.
 
 **3. `src-tauri/src/overlay.rs`** — sole owner of native window behaviour, behind a state machine with
 documented invariants in its module header. Read them before touching anything window-related.
@@ -102,16 +120,29 @@ only Windows is tested.
 - Window size is driven by content: `useOverlaySize.ts` measures the panel and reports it; `html/body`
   are `width/height: max-content` so measurement is never clamped by the current window size.
   Grow immediately, shrink after the spring settles.
+- **`on_window_event` in `lib.rs` returns early for the `history` label.** Forwarding a second window's
+  events into `OverlayWindow` would redock the overlay whenever history moved and — off macOS, where
+  `Focused(false)` *is* the outside-click signal — collapse the panel whenever history was dismissed.
+- **Two Vite entries.** A new window means an entry in `build.rollupOptions.input` *and* in
+  `tauri.conf.json`'s `app.windows`, *and* its label in `capabilities/default.json` — a window absent
+  from that list gets no `fs` permission and reads an empty directory.
 
 ### Design constraints worth knowing before "fixing" them
 
 - The context capsule is **context usage, not progress** — agents expose no progress and a heuristic
   one would be invented.
 - A session is marked `error` only after 3 consecutive failed tool calls; one failing test is normal.
-- Stale sessions (>10min quiet) are dropped, **except** ones needing attention.
+- Stale sessions (>10min quiet) are dropped from the overlay, **except** ones needing attention — and
+  archived to `history/` by the next `SessionStart` sweep, so dropped never means lost.
+- History is **two directories of JSON, not a database.** The session files already are the
+  event-sourced record, so search/stats/timeline are `filter`/`reduce` over them. The ceiling is
+  memory: every session is loaded when the window opens, which is fine for thousands of ~5KB files.
+  SQLite earns its place past that, or when something outside this process needs to query — not before.
+- Archived timelines are capped at `MAX_EVENTS` (50) like live ones. Raising it costs disk per session,
+  not runtime.
 - Motion respects `prefers-reduced-motion`.
 - Deliberate simplifications are marked with `ponytail:` comments (polling over file watching, 200-file
-  cap, two token-window buckets).
+  cap, two token-window buckets, no database behind history).
 
 The surface is an opaque CSS panel (`.panel` in `src/App.css`) — there is no vibrancy code in
 `src-tauri`, whatever an older draft of the README claimed.

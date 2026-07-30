@@ -1,6 +1,7 @@
 import { Menu } from '@tauri-apps/api/menu';
 import { TrayIcon } from '@tauri-apps/api/tray';
 import { invoke } from '@tauri-apps/api/core';
+import { Window } from '@tauri-apps/api/window';
 import { needsAttention, type SessionState } from './protocol';
 import { isPaused, setPaused } from './notify';
 import { iconsAreTemplate, trayIcon } from './trayIcons';
@@ -9,6 +10,19 @@ import { overlayHide, overlayIsVisible, overlayShow } from './overlay';
 let tray: TrayIcon | null = null;
 let creating: Promise<TrayIcon> | null = null;
 let shownAttention: boolean | null = null;
+
+/**
+ * Raise the history window. Declared hidden in tauri.conf.json and hidden again
+ * on close, so it always exists to be found by label. `setFocus` is what makes
+ * the search field typable: an LSUIElement app is not active until something
+ * asks, and unlike the overlay this window is meant to take focus.
+ */
+async function showHistory() {
+  const history = await Window.getByLabel('history');
+  if (!history) return;
+  await history.show();
+  await history.setFocus();
+}
 
 async function buildMenu() {
   return Menu.new({
@@ -19,6 +33,11 @@ async function buildMenu() {
         // Routed through OverlayWindow, never `getCurrentWindow().show()`:
         // a window shown directly comes back unordered and stays invisible.
         action: async () => ((await overlayIsVisible()) ? overlayHide() : overlayShow()),
+      },
+      {
+        id: 'history',
+        text: 'Session History…',
+        action: () => void showHistory().catch(() => {}),
       },
       {
         id: 'pause',

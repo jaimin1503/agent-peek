@@ -15,6 +15,13 @@ const path = require('path');
 const ROOT = path.join(os.homedir(), '.agentpeek');
 const SESSIONS = path.join(ROOT, 'sessions');
 
+// Where a session goes when it ends. Same JSON, same shape, different directory:
+// `sessions/` means "live, poll me", `history/` means "over, read me once".
+// ponytail: two directories and no database. The files are already the
+// event-sourced record; SQLite earns its place when searching them gets slow or
+// when something outside this process needs to query them.
+const HISTORY = path.join(ROOT, 'history');
+
 // Claude session ids are UUIDs. Anything else is rejected rather than
 // sanitized, so a malformed payload can never steer a write out of SESSIONS.
 const SESSION_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -26,6 +33,14 @@ const MAX_FILES = 200;
 const MAX_EVENTS = 50;
 const TOKEN_REFRESH_MS = 10_000;
 const FAILURES_BEFORE_ERROR = 3;
+
+/**
+ * How quiet a live session file has to be before the sweep calls it dead.
+ * Deliberately the same threshold the overlay hides a session at
+ * (STALE_MS in useSessions.ts) — a session the overlay has given up on is
+ * exactly one that will never fire SessionEnd.
+ */
+const STALE_MS = 10 * 60 * 1000;
 
 // Commands that mean "running the test suite" rather than any other shell work.
 const TEST_COMMAND =
@@ -151,7 +166,7 @@ function editedFile(toolName, input) {
 }
 
 /**
- * Context usage from the transcript's most recent assistant turn.
+ * Context usage and model from the transcript's most recent assistant turn.
  * Only the tail is read — these files grow into the megabytes and this runs
  * inside a hook that must stay fast.
  */
@@ -192,7 +207,7 @@ function readTokens(transcriptPath) {
     // the window is the larger one.
     // ponytail: two buckets cover every shipping model; widen if a third appears.
     const max = /\[1m\]|-1m\b/.test(model) || used > 200_000 ? 1_000_000 : 200_000;
-    return { used, max };
+    return { used, max, model };
   }
   return null;
 }
@@ -250,6 +265,54 @@ function save(file, state) {
   }
 }
 
+/**
+ * Move a finished session out of `sessions/` and into `history/`, stamped with
+ * when it ended. Written before the original is removed, never after: the
+ * overlay reads the file vanishing as "this session is over", so a crash
+ * between the two must lose the live copy, not the permanent one.
+ */
+function archive(id, state, endedAt) {
+  state.endedAt = endedAt;
+  fs.mkdirSync(HISTORY, { recursive: true });
+  save(path.join(HISTORY, id + '.json'), state);
+  try {
+    fs.unlinkSync(path.join(SESSIONS, id + '.json'));
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Archive sessions that ended without saying so. A killed process never fires
+ * SessionEnd, so its file would sit in `sessions/` forever — invisible to the
+ * overlay after STALE_MS, and absent from history because nothing moved it.
+ *
+ * Runs on SessionStart only. Every other hook is on the critical path of a live
+ * turn, and this one reads the whole directory.
+ */
+function sweep(now) {
+  let names;
+  try {
+    names = fs.readdirSync(SESSIONS);
+  } catch {
+    return; // nothing has ever run
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const id = name.slice(0, -'.json'.length);
+    if (!SESSION_ID.test(id)) continue;
+
+    const state = load(path.join(SESSIONS, name));
+    if (!state || now - (state.updatedAt || 0) < STALE_MS) continue;
+    try {
+      // Its last sign of life, not now: the session died whenever it went quiet.
+      archive(id, state, state.updatedAt || now);
+    } catch {
+      /* the next SessionStart tries again */
+    }
+  }
+}
+
 function main() {
   let raw = '';
   process.stdin.setEncoding('utf8');
@@ -270,19 +333,28 @@ function apply(payload) {
 
   const event = payload.hook_event_name;
   const file = path.join(SESSIONS, id + '.json');
+  const now = Date.now();
 
   if (event === 'SessionEnd') {
-    try {
-      fs.unlinkSync(file);
-    } catch {
-      /* already gone */
+    const ended = load(file);
+    if (ended) {
+      try {
+        archive(id, ended, now);
+      } catch {
+        // History is best effort; the live file still has to go, or the overlay
+        // shows a finished session until the stale sweep catches it.
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          /* already gone */
+        }
+      }
     }
     return;
   }
 
   fs.mkdirSync(SESSIONS, { recursive: true });
 
-  const now = Date.now();
   const state = load(file) || {
     agent: 'claude',
     sessionId: id,
@@ -311,6 +383,7 @@ function apply(payload) {
 
   switch (event) {
     case 'SessionStart':
+      sweep(now);
       state.status = 'idle';
       state.message = 'Session started';
       state.startedAt = now;
@@ -394,7 +467,10 @@ function apply(payload) {
     try {
       const tokens = readTokens(payload.transcript_path);
       if (tokens) {
-        state.tokens = tokens;
+        state.tokens = { used: tokens.used, max: tokens.max };
+        // Kept beside the counts rather than inside them: the overlay only ever
+        // draws the bar, but history wants to say which model did the work.
+        if (tokens.model) state.model = tokens.model;
         state.tokensAt = now;
       }
     } catch {
@@ -415,8 +491,11 @@ module.exports = {
   toolFailed,
   readTokens,
   apply,
+  sweep,
   SESSION_ID,
   SESSIONS,
+  HISTORY,
   ROOT,
   MAX_EVENTS,
+  STALE_MS,
 };

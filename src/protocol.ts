@@ -35,11 +35,18 @@ export interface SessionState {
   toolName?: string;
   startedAt: number;
   updatedAt: number;
+  /**
+   * Set by the hook when the session is archived into `~/.agentpeek/history/`.
+   * Absent for anything in `sessions/`, which is how the two are told apart.
+   */
+  endedAt?: number;
   /** Distinct files edited. Doubles as the dedupe set behind the files stat. */
   filesTouched: string[];
   /** Append-only history, newest last, capped at 50 by the hook. */
   events?: AgentEvent[];
   tokens?: { used: number; max: number };
+  /** Model id from the transcript's last assistant turn, e.g. "claude-opus-5[1m]". */
+  model?: string;
   /** macOS app name for `open -a`, or null when TERM_PROGRAM is unmapped. */
   terminalApp?: string | null;
 }
@@ -78,6 +85,14 @@ export function projectName(s: SessionState): string {
  */
 export function filesModified(s: SessionState): number {
   return s.filesTouched?.length ?? 0;
+}
+
+/**
+ * How long the session ran. `endedAt` for an archived one; for a live one the
+ * last thing it did, which is also where the overlay freezes its clock.
+ */
+export function durationOf(s: SessionState): number {
+  return Math.max(0, (s.endedAt ?? s.updatedAt) - s.startedAt);
 }
 
 export function formatElapsed(ms: number): string {
