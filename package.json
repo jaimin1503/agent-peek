@@ -1,7 +1,7 @@
 {
   "name": "agentpeek",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Always-on-top overlay showing what your Claude Code sessions are doing",
   "license": "MIT",
   "repository": {
